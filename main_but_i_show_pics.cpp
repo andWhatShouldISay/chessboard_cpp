@@ -585,23 +585,20 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
     cout << "intersection " << pts[2] << endl;
     cout << "intersection " << pts[3] << endl;
 
+    auto pts_shift = pts;
+    for (auto &p:pts_shift) {
+        p.x -= cross_size / 2.0;
+        p.y -= cross_size / 2.0;
+    }
+
     vector<cv::Point2f> target = {{0.0,    0.0},
                                   {0.0,    imglen},
                                   {imglen, imglen},
                                   {imglen, 0.0}};
 
-    vector<cv::Point2f> target2_v = {{0.0 + 0.0 / 2,             0.0 + cross_size / 2},
-                                     {0.0 + 0.0 / 2,             (double) imglen + cross_size / 2},
-                                     {(double) imglen + 0.0 / 2, (double) imglen + cross_size / 2},
-                                     {(double) imglen + 0.0 / 2, 0.0 + cross_size / 2}};
-    vector<cv::Point2f> target2_h = {{0.0 + cross_size / 2,             0.0 + 0.0 / 2},
-                                     {0.0 + cross_size / 2,             (double) imglen + 0.0 / 2},
-                                     {(double) imglen + cross_size / 2, (double) imglen + 0.0 / 2},
-                                     {(double) imglen + cross_size / 2, 0.0 + 0.0 / 2}};
-
     auto h = cv::findHomography(pts, target);
-    auto h2_v = cv::findHomography(pts, target2_v);
-    auto h2_h = cv::findHomography(pts, target2_h);
+    auto h2_v = cv::findHomography(pts_shift, target);
+    auto h2_h = cv::findHomography(pts_shift, target);
 
     Mat warped_lines, warped_points;
     Mat warped_fft_h, warped_fft_v;
