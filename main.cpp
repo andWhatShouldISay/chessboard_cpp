@@ -893,7 +893,5 @@ int main(int n, char **args) {
         cout << e.what() << endl;
     }
 
-    cv::waitKey();
-
     return 0;
 }
