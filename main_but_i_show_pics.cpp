@@ -623,7 +623,7 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
         double mx = *max_element(a.begin(), a.end());
         int coef = 3;
         for (int i = 0; i < 234; i++) {
-            if (a[i] >= *max_element(a.begin() + i - 20, a.begin() + i + 20) && a[i] > 1) {
+            if (a[i] >= *max_element(a.begin() + i - min(i, 20), a.begin() + i + 20) && a[i] > 1) {
                 ans.push_back(i);
             }
         }
