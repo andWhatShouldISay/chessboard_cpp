@@ -856,6 +856,10 @@ void work(const string &filename) {
     auto img_grayscale = cv::imread(filename, 0);
     cv::imshow("source", img_grayscale);
 
+    if (img_grayscale.empty()){
+        throw invalid_argument("error while reading file");
+    }
+
     Mat img_256;
     cv::resize(img_grayscale, img_256, {256, 256});
     cv::imshow("resized", img_256);
