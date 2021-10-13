@@ -10,10 +10,12 @@ using namespace std;
 
 typedef cv::Mat Mat;
 
-const int imglen = 256;
+const int imglen = 512;
+const int imglen0 = 128;
+const int coef = imglen / imglen0;
 
-auto sobel(Mat &src) {
-    Mat dx, dy, grad;
+auto sobel(Mat &src, int threshold) {
+    Mat dx, dy, grad, dir;
     cv::Sobel(src, dx, CV_16SC1, 1, 0, 3);
     cv::Sobel(src, dy, CV_16SC1, 0, 1, 3);
 
@@ -23,17 +25,23 @@ auto sobel(Mat &src) {
     dx.convertTo(dx, CV_32F);
     dy.convertTo(dy, CV_32F);
 
+    cv::phase(dy, dx, dir);
+
+    dir *= float(180 / acos(-1));
+
     cv::pow(dx, 2, dx);
     cv::pow(dy, 2, dy);
 
     grad = dx + dy;
 
+
     cv::pow(grad, 0.5, grad);
     cv::convertScaleAbs(grad, grad);
 
-    grad = grad > 150;
+    grad = grad >= threshold;
 
-    return grad;
+
+    return make_pair(grad, dir);
 }
 
 auto gen_cross(int size, int line_width, double angle, int imglen, char hv) {
@@ -68,93 +76,11 @@ auto gen_cross(int size, int line_width, double angle, int imglen, char hv) {
     }
 }
 
-
-class cross {
-public:
-    Mat mat;
-    Mat dft2;
-    double norm;
-
-    cross(const Mat &c) : mat(c) {
-        cv::dft(mat, dft2, cv::DFT_COMPLEX_OUTPUT);
-
-        norm = sqrt(cv::sum(c.mul(c))[0]);
-
-    }
-
-};
-
-Mat dftE;
-
-vector<cross> crosses;
-
-const int cross_line_width = 2;
-const int cross_side_length = 15;
-const int cross_size = cross_side_length * 2 + cross_line_width;
-
-void precalc_cross() {
-
-    /*cout << "an example of a vertical line mask:" << endl;
-    auto random_cross = gen_cross(cross_size, cross_line_width, acos(-1) * (85 + rand() % 10) / 90, imglen, 'v');
-    cout << random_cross(Rect(0, 0, cross_size, cross_size)) << endl;*/
-
-    for (int i = 85; i < 95; i++) {
-        auto c = gen_cross(cross_size, cross_line_width, acos(-1) * i / 90, imglen, 'v');
-        crosses.emplace_back(c);
-    }
-
-    for (int i = 85; i < 95; i++) {
-        auto c = gen_cross(cross_size, cross_line_width, acos(-1) * i / 90, imglen, 'h');
-        crosses.emplace_back(c);
-    }
-
-    Mat E(imglen, imglen, CV_32F);
-    E = 0.0;
-    E(cv::Rect(0, 0, cross_size, cross_size)) = 1.0;
-
-    dft(E, dftE, cv::DFT_COMPLEX_OUTPUT);
-
-}
-
-Mat fft_ind(Mat &x, vector<cross>::iterator first, vector<cross>::iterator last) {
-    Mat dft1, dft1sq;
-    dft(x, dft1, cv::DFT_COMPLEX_OUTPUT);
-    dft(x.mul(x), dft1sq,
-        cv::DFT_COMPLEX_OUTPUT); // dft1sq равен dft1 потому что вход состоит из 0 и 1; оставил для приличия
-
-    Mat xx;
-    cv::mulSpectrums(dft1sq, dftE, xx, 0, true);
-
-    cv::idft(xx, xx, cv::DFT_COMPLEX_INPUT | cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
-
-    cv::pow(xx, 0.5, xx);
-
-    Mat score(x.size(), CV_32F);
-    score = 0.0;
-
-    for (auto it = first; it != last; ++it) {
-        Mat xy;
-
-        cv::mulSpectrums(dft1, it->dft2, xy, 0, true);
-        cv::idft(xy, xy, cv::DFT_COMPLEX_INPUT | cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
-
-        auto res = Mat(xy / xx / it->norm);
-
-        cv::patchNaNs(res);
-
-        score = max(score, res);
-
-    }
-
-    return score;
-
-}
-
-vector<vector<pair<int, int> > > calc_clusters(const Mat &m, bool show_pics = false) {
+vector<vector<pair<int, int> > > calc_clusters(const Mat &m, int imglen0, bool show_pics = false) {
     vector<pair<int, int> > points;
-    for (int i = 0; i < imglen; i++) {
-        for (int j = 0; j < imglen; j++) {
-            if (m.at<float>(i, j)) {
+    for (int i = 0; i < imglen0; i++) {
+        for (int j = 0; j < imglen0; j++) {
+            if (m.at<unsigned char>(i, j)) {
                 points.emplace_back(i, j);
             }
         }
@@ -201,7 +127,7 @@ vector<vector<pair<int, int> > > calc_clusters(const Mat &m, bool show_pics = fa
             clr_points.at<cv::Vec3f>(points[i].first, points[i].second) = random_clr[labels[i]];
         }
 
-        cv::imshow("points", clr_points);
+        cv::imshow("points " + to_string(imglen0), clr_points);
     }
 
 
@@ -277,48 +203,91 @@ bool intersection(line &lh, line &lv,
     return true;
 }
 
+double precision(double x) {
+    return abs(x - round(x));
+}
 
-void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points,
-                  vector<vector<pair<int, int> > > &clusters) {
+bool intersects(line &l, vector<line> &v) {
+    return any_of(v.begin(), v.end(), [&](line &a) {
+        cv::Point2f p;
+        bool ok = intersection(l, a, p);
+        return ok && 0 <= p.x && p.x <= imglen0 && 0 <= p.y && p.y <= imglen0;
+    });
+}
+
+Mat get_intersections(Mat &borders, Mat &hor, Mat &vert, int imglen0, int le, bool check_only_8 = false) {
+    Mat intersections = cv::Mat::zeros({imglen0, imglen0}, CV_8U);
+
+    vector<int> add(imglen0, 1);
+    if (check_only_8)
+        for (int i = 13; i < imglen0; i += imglen0 / 8)
+            add[i] = imglen0 / 8 - 13 * 2;
+
+    for (int i = le; i + 2 + le < imglen0; i += add[i]) {
+        for (int j = le; j + 2 + le < imglen0; j += add[j]) {
+            int val1 = cv::sum(borders(cv::Rect(i, j, 2, 2)))[0];
+
+            int val2 = cv::sum(hor(cv::Rect(i - le, j, le, 2)))[0];
+            if (!val2)
+                continue;
+
+            int val3 = cv::sum(vert(cv::Rect(i, j - le, 2, le)))[0];
+            if (!val3)
+                continue;
+
+
+            int val4 = cv::sum(hor(cv::Rect(i + 2, j, le, 2)))[0];
+            if (!val4)
+                continue;
+
+            int val5 = cv::sum(vert(cv::Rect(i, j + 2, 2, le)))[0];
+
+            int val = (le > 3 || val1) && val2 && val3 && val4 && val5;
+            intersections(cv::Rect(i + 1, j + 1, 1, 1)) = (!!val) * 255;
+        }
+    }
+
+    //cv::imshow("keks " + to_string(imglen0), intersections);
+
+    return intersections;
+}
+
+void find_corners(const Mat &source, const Mat &borders, const Mat &fft_v, const Mat &fft_h, const Mat &points,
+                  const vector<vector<pair<int, int> > > &clusters) {
 
     Mat borders_coloured;
 
     cv::cvtColor(borders, borders_coloured, cv::COLOR_GRAY2RGB);
-
-    for (int i = 0; i < 180; i++) {
-        sins[i] = sin(i / 180.0 * acos(-1));
-        coss[i] = cos(i / 180.0 * acos(-1));
-    }
 
     auto verify = [&clusters](line l) {
         int score = 0;
         int r = l.r, th = l.th;
         for (auto &cluster: clusters) {
             for (auto &pt: cluster) {
-                int y = pt.first + cross_size / 2, x = pt.second + cross_size / 2;
+                int y = pt.first, x = pt.second;
                 int th_norm = th >= 0 ? th : 180 + th;
 
-                if (abs(-r + x * coss[th_norm] + y * sins[th_norm]) <= 5) {
+                if (abs(-r + x * coss[th_norm] + y * sins[th_norm]) <= 10) {
                     score += 1;
                     break;
                 }
             }
-            if (score >= 3) {
+            if (score >= 2) {
                 break;
             }
         }
-        return score >= 3;
+        return score >= 2;
     };
 
     int v_beg, v_end, h_beg, h_end;
 
     auto draw_horizontal = [&](vector<line> &drawn, int hough_threshold, int &beg, int &end) {
         map<line, int> acc;
-        for (int i = 0; i < imglen; i++) {
-            for (int j = 0; j < imglen; j++) {
+        for (int i = 0; i < imglen0; i++) {
+            for (int j = 0; j < imglen0; j++) {
                 if (fft_h.at<unsigned char>(i, j)) {
-                    int y = i + cross_size / 2, x = j + cross_size / 2;
-                    if (2 <= y && y <= 251 && 2 <= x && x <= 251) {
+                    int y = i, x = j;
+                    if (2 <= y && y <= imglen0 - 5 && 2 <= x && x <= imglen0 - 5) {
                         for (int th = 85; th < 96; th++) {
                             int r = x * coss[th] + y * sins[th];
                             acc[{r, th}] += 1;
@@ -332,7 +301,7 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
 
         auto is_drawn = [&drawn_mid](double y) {
             for (auto v: drawn_mid) {
-                if (abs(y - v) <= 10) {
+                if (abs(y - v) <= 5) {
                     return true;
                 }
             }
@@ -356,9 +325,9 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
             double x0 = a * p.r;
             double y0 = b * p.r;
 
-            auto y_mid = (p.r - a * 128.0) / b;
+            auto y_mid = (p.r - a * imglen0 / 2.0) / b;
 
-            if (!is_drawn(y_mid)) {
+            if (!is_drawn(y_mid) && !intersects(p, drawn)) {
                 drawn_mid.push_back(y_mid);
                 drawn.push_back(p);
             }
@@ -378,7 +347,7 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
         }
 
         if (drawn.size() >= 8) {
-            beg = 2;
+            beg = 1;
         } else if (drawn.size() >= 6) {
             beg = 1;
         } else {
@@ -388,9 +357,9 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
         if (drawn.size() <= 5) {
             end = drawn.size() - 1;
         } else if (drawn.size() <= 7) {
-            end = drawn.size() - 2;
+            end = drawn.size() - 1;
         } else {
-            end = drawn.size() - 3;
+            end = drawn.size() - 2;
         }
 
     };
@@ -398,11 +367,11 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
 
     auto draw_vertical = [&](vector<line> &drawn, int hough_threshold, int &beg, int &end) {
         map<line, int> acc;
-        for (int i = 0; i < imglen; i++) {
-            for (int j = 0; j < imglen; j++) {
+        for (int i = 0; i < imglen0; i++) {
+            for (int j = 0; j < imglen0; j++) {
                 if (fft_v.at<unsigned char>(i, j)) {
-                    int y = i + cross_size / 2, x = j + cross_size / 2;
-                    if (2 <= y && y <= 251 && 2 <= x && x <= 251) {
+                    int y = i, x = j;
+                    if (2 <= y && y <= imglen - 5 && 2 <= x && x <= imglen - 5) {
                         for (int th = -10; th < 10; th++) {
                             int th_norm = th >= 0 ? th : 180 + th;
                             int r = x * coss[th_norm] + y * sins[th_norm];
@@ -417,7 +386,7 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
 
         auto is_drawn = [&drawn_mid](double x) {
             for (auto v: drawn_mid) {
-                if (abs(x - v) <= 10) {
+                if (abs(x - v) <= 5) {
                     return true;
                 }
             }
@@ -442,9 +411,9 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
             double x0 = a * p.r;
             double y0 = b * p.r;
 
-            auto x_mid = (p.r - b * 128.0) / a;
+            auto x_mid = (p.r - b * (imglen0 / 2.0)) / a;
 
-            if (!is_drawn(x_mid)) {
+            if (!is_drawn(x_mid) && !intersects(p, drawn)) {
                 drawn_mid.push_back(x_mid);
                 drawn.push_back(p);
             }
@@ -497,19 +466,19 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
         }
 
         if (drawn.size() >= 8) {
-            end = drawn.size() - 3;
-            beg = 2;
+            end = drawn.size() - 2;
+            beg = 1;
         } else {
             end = drawn.size() - 1;
-            beg = 1;
+            beg = 0;
         }
     };
 
     vector<line> lines_hor;
-    draw_horizontal(lines_hor, imglen / 4, h_beg, h_end);
+    draw_horizontal(lines_hor, imglen0 / 10, h_beg, h_end);
 
     vector<line> lines_vert;
-    draw_vertical(lines_vert, imglen / 4, v_beg, v_end);
+    draw_vertical(lines_vert, imglen0 / 10, v_beg, v_end);
 
 
     auto draw_line = [&](line &p, int blue = 0) {
@@ -518,10 +487,10 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
         auto b = sins[th_norm];
         double x0 = a * p.r;
         double y0 = b * p.r;
-        int x1 = int(x0 + 300 * (-b));
-        int y1 = int(y0 + 300 * (a));
-        int x2 = int(x0 - 300 * (-b));
-        int y2 = int(y0 - 300 * (a));
+        int x1 = int(x0 + imglen * (-b));
+        int y1 = int(y0 + imglen * (a));
+        int x2 = int(x0 - imglen * (-b));
+        int y2 = int(y0 - imglen * (a));
 
         if ((45 <= p.th && p.th <= 135) ^ (!!blue))
             cv::line(borders_coloured, {x1, y1}, {x2, y2}, {static_cast<double>(blue), 0, 255}, 2);
@@ -543,7 +512,6 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
     cout << h_beg << ' ' << h_end << " h" << endl;
 
     vector<cv::Point2f> pts(4);
-
 
 
     if (v_beg >= v_end) {
@@ -585,48 +553,39 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
     cout << "intersection " << pts[2] << endl;
     cout << "intersection " << pts[3] << endl;
 
-    auto pts_shift = pts;
-    for (auto &p:pts_shift) {
-        p.x -= cross_size / 2.0;
-        p.y -= cross_size / 2.0;
-    }
-
-    vector<cv::Point2f> target = {{0.0,    0.0},
-                                  {0.0,    imglen},
-                                  {imglen, imglen},
-                                  {imglen, 0.0}};
+    vector<cv::Point2f> target = {{0.0,     0.0},
+                                  {0.0,     imglen0},
+                                  {imglen0, imglen0},
+                                  {imglen0, 0.0}};
 
     auto h = cv::findHomography(pts, target);
-    auto h2_v = cv::findHomography(pts_shift, target);
-    auto h2_h = cv::findHomography(pts_shift, target);
 
     Mat warped_lines, warped_points;
     Mat warped_fft_h, warped_fft_v;
 
-    cv::warpPerspective(borders, warped_lines, h, {imglen, imglen});
-    //cv::imshow("warped lines", warped_lines);
+    cv::warpPerspective(borders, warped_lines, h, {imglen0, imglen0});
 
-
-    cv::warpPerspective(fft_v, warped_fft_v, h2_v, {imglen, imglen});
-    cv::warpPerspective(fft_h, warped_fft_h, h2_h, {imglen, imglen});
+    cv::warpPerspective(fft_v, warped_fft_v, h, {imglen0, imglen0});
+    cv::warpPerspective(fft_h, warped_fft_h, h, {imglen0, imglen0});
     cv::imshow("warped v", warped_fft_v);
     cv::imshow("warped h", warped_fft_h);
+
 
     warped_fft_h.convertTo(warped_fft_h, CV_32F);
     warped_fft_v.convertTo(warped_fft_v, CV_32F);
 
     vector<double> sum_x(imglen), sum_y(imglen);
 
-
     auto peaks = [&](vector<double> &a) {
         vector<int> ans;
-        double mx = *max_element(a.begin(), a.end());
-        int coef = 3;
-        for (int i = 0; i < 234; i++) {
-            if (a[i] >= *max_element(a.begin() + i - min(i, 20), a.begin() + i + 20) && a[i] > 1) {
+        const int pad = imglen0 / 11;
+        for (int i = 0; i < imglen0 - pad; i++) {
+            if (a[i] > 1 && a[i] >= *max_element(a.begin() + i - min(i, pad), a.begin() + i + pad)) {
                 ans.push_back(i);
+                cout << i << ' ' << a[i] << endl;
             }
         }
+        cout << endl;
 
         if (ans.empty())
             return -1;
@@ -634,12 +593,14 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
         vector<int> probably_difs;
         for (int i = 0; i + 1 < ans.size(); i++) {
             probably_difs.push_back(ans[i + 1] - ans[i]);
+            cout << ' ' << probably_difs.back() << ' ' << imglen0 * 1.0 / probably_difs.back() << endl;
         }
+        cout << endl;
 
         for (int i = 0; i + 1 < probably_difs.size(); i++) {
             for (int j = 0; j < probably_difs.size(); j++) {
                 if (i != j && i + 1 != j) {
-                    if (abs(probably_difs[j] - probably_difs[i] - probably_difs[i + 1]) <= 10) {
+                    if (abs(probably_difs[j] - probably_difs[i] - probably_difs[i + 1]) <= 5) {
                         probably_difs.push_back(probably_difs[i] + probably_difs[i + 1]);
                         probably_difs.erase(probably_difs.begin() + i, probably_difs.begin() + i + 2);
                         --i;
@@ -651,62 +612,54 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
 
         vector<int> difs;
         for (auto &x: probably_difs)
-            if (x > 15)
+            if (x > pad * 3 / 4)
                 difs.push_back(x);
+
 
         sort(difs.rbegin(), difs.rend());
 
-
         if (difs.empty())
             return 2;
-        return min(8, int(0.001 + round(imglen * 1.0 / difs[difs.size() / 2])));
+
+        int res = int(0.001 + round(imglen0 * 1.0 / difs[difs.size() / 3]));
+
+        if (res >= 7)
+            return 2 + (int) difs.size();
+
+        return min(8, res);
     };
 
-    int x_cells = -2, y_cells = -2;
 
-    map<int, int> kol_x;
-    for (int x = 0; x < imglen; x++) {
-        for (int i = 0; i < imglen; i++) {
-            sum_y[i] = 256.0 * warped_fft_h.at<float>(i, x);
-        }
-        ++kol_x[peaks(sum_y)];
+    for (int i = 0; i < imglen0; i++) {
+        sum_y[i] = 256.0 * cv::sum(warped_fft_v(cv::Rect(i, 0, 1, imglen0)))[0];
     }
 
-    for (auto &p: kol_x) {
-        if (p.first > 1 && p.second > kol_x[y_cells])
-            y_cells = p.first;
+    for (int i = 0; i < imglen0; i++) {
+        sum_x[i] = 256.0 * cv::sum(warped_fft_h(cv::Rect(0, i, imglen0, 1)))[0];
     }
 
-    map<int, int> kol_y;
-    for (int y = 0; y < imglen; y++) {
-        for (int i = 0; i < imglen; i++) {
-            sum_x[i] = 256.0 * warped_fft_v.at<float>(y, i);
-        }
-        ++kol_y[peaks(sum_x)];
-    }
+    int x_cells = peaks(sum_y), y_cells = peaks(sum_x);
 
-    for (auto &p: kol_y) {
-        if (p.first > 1 && p.second > kol_y[x_cells])
-            x_cells = p.first;
-    }
-
-    if (x_cells < 0 || y_cells < 0){
+    if (x_cells < 0 || y_cells < 0) {
         throw invalid_argument("i am unsure about cells' sizes");
     }
+
 
     cv::cvtColor(warped_lines, warped_lines, cv::COLOR_GRAY2RGB);
 
     for (int i = 1; i < x_cells; i++) {
-        int x = imglen * i / x_cells;
-        cv::line(warped_lines, {x, 0}, {x, 256}, {0, 0.3, 0.6}, 2);
+        int x = imglen0 * i / x_cells;
+        cv::line(warped_lines, {x, 0}, {x, imglen0}, {0, 75, 150}, 2);
     }
 
     for (int i = 1; i < y_cells; i++) {
-        int y = imglen * i / y_cells;
-        cv::line(warped_lines, {0, y}, {256, y}, {0, 0.3, 0.6}, 2);
+        int y = imglen0 * i / y_cells;
+        cv::line(warped_lines, {0, y}, {imglen0, y}, {0, 75, 150}, 2);
     }
 
     cv::imshow("calculated cells", warped_lines);
+
+    h = cv::Matx33d(coef, 0, 0, 0, coef, 0, 0, 0, 1) * h * cv::Matx33d(1.0 / coef, 0, 0, 0, 1.0 / coef, 0, 0, 0, 1);
 
 
     auto y8 = float(y_cells / 8.0 * imglen), x8 = float(x_cells / 8.0 * imglen);
@@ -716,7 +669,7 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
                                                                    {x8,  y8},
                                                                    {x8,  0.0}});
 
-    h_8_8 = h_8_8 * h;
+    h_8_8 = cv::Matx33d(1.0 / coef, 0, 0, 0, 1.0 / coef, 0, 0, 0, 1) * h_8_8 * h;
 
     float step = imglen / 8.0;
     auto imglen_f = float(imglen);
@@ -741,19 +694,34 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
                                                               {imglen_f, step}}
     );
 
-    auto activity = [&](const Mat &x) {
+    auto activity = [&](const Mat &x, bool flag) {
         int height = x.size[0];
         int width = x.size[1];
 
-        auto hor = cv::abs(x(cv::Rect(0, 2, width, height - 2)) - x(cv::Rect(0, 0, width, height - 2)));
+        int len = 4;
 
-        int score = 0, threshold = 32;
+        auto hor = Mat(cv::abs(x(cv::Rect(0, len, width, height - len)) - x(cv::Rect(0, 0, width, height - len))));
 
-        for (int a = 1; a < 8; a++) {
-            int d1 = -5, d2 = 6;
-            int filter_index = int(step * a) + d1;
+        int threshold = 32;
+        int times = width / 2;
+        int score = 0;
 
-            score += cv::sum((hor > threshold)(cv::Rect(0, filter_index, width, d2 - d1)))[0];
+
+        for (int i = 0; i < height - len; i++) {
+            int sum = cv::sum((hor > threshold)(cv::Rect(0, i, width, 1)))[0];
+
+            score += sum >= times * 255.0;
+
+            if (flag && sum >= times * 255.0) {
+                hor(cv::Rect(0, i, width, 1)) = 250;
+            }
+        }
+
+
+        if (flag) {
+            cout << " score " << score << endl;
+            cv::imshow("debug hor " + to_string(rand()), hor);
+            cv::imshow("debug x " + to_string(rand()), x);
         }
 
         return score;
@@ -782,16 +750,21 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
             Mat candidate;
             cv::warpPerspective(source, candidate, homo, {imglen, imglen});
 
-            //cv::imshow("candidate "+ to_string(x) + " " + to_string(y), candidate);
+            //cv::imshow("candidate " + to_string(x) + " " + to_string(y), candidate);
 
-            auto vertical_stripe1 = activity(candidate(cv::Rect(0, 0, int(step) + 2, imglen)));
-            auto vertical_stripe2 = activity(candidate(cv::Rect(imglen - int(step) + 2, 0, int(step) - 2, imglen)));
+            int flag = false;
 
-            auto horizontal_stripe1 = activity(candidate(cv::Rect(0, 0, imglen, int(step) + 2)).t());
+            auto vertical_stripe1 = activity(candidate(cv::Rect(0, 0, int(step) + 2, imglen)), 0);
+            auto vertical_stripe2 = activity(candidate(cv::Rect(imglen - int(step) + 2, 0, int(step) - 2, imglen)),
+                                             flag);
+
+            auto horizontal_stripe1 = activity(candidate(cv::Rect(0, 0, imglen, int(step) + 2)).t(), 0);
             auto horizontal_stripe2 = activity(
-                    candidate(cv::Rect(0, imglen - int(step) + 2, imglen, int(step) - 2)).t());
+                    candidate(cv::Rect(0, imglen - int(step) + 2, imglen, int(step) - 2)).t(), 0);
 
             int score = min({vertical_stripe1, vertical_stripe2, horizontal_stripe1, horizontal_stripe2});
+
+            cout << x << ' ' << y << ' ' << score << endl;
 
             if (score > best_score) {
                 best_score = score;
@@ -799,99 +772,229 @@ void find_corners(Mat &source, Mat &borders, Mat &fft_v, Mat &fft_h, Mat &points
                 best_homo = homo;
             }
 
+
         }
     }
 
     cv::imshow("result", best_candidate);
 
-    auto inv = best_homo.inv();
+    auto work_with_result_matrix = [&](Mat &best_homo, const string &wname) {
 
-    cv::Matx34f corners(0.0, 0.0, imglen, imglen,
-                        0.0, imglen, imglen, 0.0,
-                        1.0, 1.0, 1.0, 1.0);
+        auto inv = best_homo.inv();
 
-    auto real_corners = Mat(inv * corners);
+        cv::Matx34f corners(0.0, 0.0, imglen, imglen,
+                            0.0, imglen, imglen, 0.0,
+                            1.0, 1.0, 1.0, 1.0);
 
-    cout << endl;
-    cout << real_corners << endl;
+        auto real_corners = Mat(inv * corners);
 
-    real_corners = real_corners.t();
+        cout << endl;
+        cout << real_corners << endl;
 
-    Mat coloured_source;
+        real_corners = real_corners.t();
 
-    cv::cvtColor(source, coloured_source, cv::COLOR_GRAY2RGB);
+        Mat coloured_source;
 
-    vector<cv::Point2f> v_corners = {{real_corners.at<float>(0, 0) / real_corners.at<float>(0, 2),
-                                                                                                real_corners.at<float>(
-                                                                                                        0, 1) /
-                                                                                                real_corners.at<float>(
-                                                                                                        0, 2)},
-                                     {real_corners.at<float>(1, 0) / real_corners.at<float>(1,
-                                                                                            2), real_corners.at<float>(
-                                             1, 1) / real_corners.at<float>(1, 2)},
-                                     {real_corners.at<float>(2, 0) / real_corners.at<float>(2,
-                                                                                            2), real_corners.at<float>(
-                                             2, 1) / real_corners.at<float>(2, 2)},
-                                     {real_corners.at<float>(3, 0) / real_corners.at<float>(3,
-                                                                                            2), real_corners.at<float>(
-                                             3, 1) / real_corners.at<float>(3, 2)}
+        cv::cvtColor(source, coloured_source, cv::COLOR_GRAY2RGB);
+
+        vector<cv::Point2f> v_corners = {{real_corners.at<float>(0, 0) / real_corners.at<float>(0, 2),
+                                                                                                    real_corners.at<float>(
+                                                                                                            0, 1) /
+                                                                                                    real_corners.at<float>(
+                                                                                                            0, 2)},
+                                         {real_corners.at<float>(1, 0) / real_corners.at<float>(1,
+                                                                                                2), real_corners.at<float>(
+                                                 1, 1) / real_corners.at<float>(1, 2)},
+                                         {real_corners.at<float>(2, 0) / real_corners.at<float>(2,
+                                                                                                2), real_corners.at<float>(
+                                                 2, 1) / real_corners.at<float>(2, 2)},
+                                         {real_corners.at<float>(3, 0) / real_corners.at<float>(3,
+                                                                                                2), real_corners.at<float>(
+                                                 3, 1) / real_corners.at<float>(3, 2)}
+        };
+
+        cout << endl;
+        for (auto &x: v_corners)cout << x << endl;
+
+        cv::line(coloured_source, v_corners[0], v_corners[1], {0, 0, 255}, 2);
+        cv::line(coloured_source, v_corners[1], v_corners[2], {0, 0, 255}, 2);
+        cv::line(coloured_source, v_corners[2], v_corners[3], {0, 0, 255}, 2);
+        cv::line(coloured_source, v_corners[3], v_corners[0], {0, 0, 255}, 2);
+
+        cv::imshow(wname, coloured_source);
+        return v_corners;
     };
 
-    cout << endl;
-    for (auto &x: v_corners)cout << x << endl;
+    auto work_points = [&](const string &name) {
+        best_homo.convertTo(best_homo, CV_32F);
 
-    cv::line(coloured_source, v_corners[0], v_corners[1], {0, 0, 255}, 2);
-    cv::line(coloured_source, v_corners[1], v_corners[2], {0, 0, 255}, 2);
-    cv::line(coloured_source, v_corners[2], v_corners[3], {0, 0, 255}, 2);
-    cv::line(coloured_source, v_corners[3], v_corners[0], {0, 0, 255}, 2);
+        Mat warped_points;
 
-    cv::imshow("found corners", coloured_source);
+        cv::warpPerspective(source, warped_points, best_homo,
+                            {imglen, imglen});
 
+        auto[borders, dir] = sobel(warped_points, 70);
+
+        auto vert = Mat((85 <= dir) & (dir <= 95) & borders);
+        auto hor = Mat(((170 <= dir) | (dir <= 10)) & borders);
+
+        auto start = chrono::steady_clock::now();
+        Mat intersections = get_intersections(borders, hor, vert, imglen, 10, true);
+        auto end = chrono::steady_clock::now();
+        cout << "time " << chrono::duration_cast<chrono::milliseconds>(end - start).count() << endl;
+
+        if (name == "homo fix") {
+            vector<Mat> channels = {intersections, vert, hor};
+            Mat coloured;
+            merge(channels, coloured);
+
+            cv::imshow("new merge", coloured);
+        }
+
+        auto new_clusters = calc_clusters(intersections, imglen, true);
+
+        cv::cvtColor(warped_points, warped_points, cv::COLOR_GRAY2RGB);
+
+        for (int i = imglen / 8; i < imglen; i += imglen / 8) {
+            cv::line(warped_points, {i, 0}, {i, imglen}, {255, 0, 0});
+            cv::line(warped_points, {0, i}, {imglen, i}, {255, 0, 0});
+        }
+
+        vector<cv::Point2f> target, src;
+
+        map<int,int> miss_x = {{1, 0}, {2, 0}, {3, 0}, {4, 0}, {5, 0}, {6, 0}, {7, 0}};
+        map<int,int> miss_y = {{1, 0}, {2, 0}, {3, 0}, {4, 0}, {5, 0}, {6, 0}, {7, 0}};
+
+        for (auto &cluster: new_clusters) {
+            float y_med = 0, x_med = 0;
+            for (auto &pt: cluster) {
+                float y = pt.first, x = pt.second;
+                y_med += y;
+                x_med += x;
+            }
+            y_med /= cluster.size();
+            x_med /= cluster.size();
+
+            double x_cross = x_med / (imglen / 8.0);
+            double y_cross = y_med / (imglen / 8.0);
+
+            double tolerance = 0.3;
+
+
+            if (-tolerance <= x_cross && x_cross <= 8 + tolerance)
+                if (-tolerance <= y_cross && y_cross <= 8 + tolerance) {
+                    if (precision(x_cross) <= tolerance && precision((y_cross)) <= tolerance) {
+
+                        cv::circle(warped_points, {static_cast<int>(x_med), static_cast<int>(y_med)}, 3,
+                                   {0, 0, 255}, -1);
+                        src.emplace_back(x_med, y_med);
+
+                        miss_x[round(x_cross)] += 1;
+                        miss_y[round(y_cross)] += 1;
+
+                        target.emplace_back(static_cast<float>(imglen / 8.0 * round(x_cross)),
+                                            static_cast<float>(imglen / 8.0 * round(y_cross)));
+                    }
+                }
+        }
+
+        int threshold = 1;
+
+        for (int i = 1; i <= 7; i++) {
+            if (miss_x[i] <= threshold) {
+                for (auto &p: target) {
+                    p.x -= step;
+                }
+            } else {
+                break;
+            }
+        }
+
+        for (int i = 7; i >= 1; i--) {
+            if (miss_x[i] <= threshold) {
+                for (auto &p: target) {
+                    p.x += step;
+                }
+            } else {
+                break;
+            }
+        }
+
+        for (int i = 1; i <= 7; i++) {
+            if (miss_y[i] <= threshold) {
+                for (auto &p: target) {
+                    p.y -= step;
+                }
+            } else {
+                break;
+            }
+        }
+
+        for (int i = 7; i >= 1; i--) {
+            if (miss_y[i] <= threshold) {
+                for (auto &p: target) {
+                    p.y += step;
+                }
+            } else {
+                break;
+            }
+        }
+
+        cv::imshow("warped points " + name, warped_points);
+
+        if (src.size() < 4)
+            throw invalid_argument("i agree that what i found isn't accurate");
+
+        Mat homo_fix = cv::findHomography(src, target, cv::RANSAC);
+        homo_fix.convertTo(homo_fix, CV_32F);
+
+        return homo_fix * best_homo;
+    };
+
+    work_with_result_matrix(best_homo, "found corners");
+
+    best_homo = work_points("homo fix");
+    best_homo = work_points("homo fix 2");
+
+    auto v_corners = work_with_result_matrix(best_homo, "fixed corners");
+    for (auto &p: v_corners)
+        p /= imglen;
 }
 
 void work(const string &filename) {
     auto img_grayscale = cv::imread(filename, 0);
     cv::imshow("source", img_grayscale);
 
-    if (img_grayscale.empty()){
-        throw invalid_argument("error while reading file");
-    }
+    Mat img_128;
+    cv::resize(img_grayscale, img_128, {imglen0, imglen0});
+    cv::imshow("resized", img_128);
 
-    Mat img_256;
-    cv::resize(img_grayscale, img_256, {256, 256});
-    cv::imshow("resized", img_256);
+    auto[borders, dir] = sobel(img_128, 200);
 
-    auto borders = sobel(img_256);
-    cv::imshow("sobel", borders);
-    borders.convertTo(borders, CV_32F);
-    borders /= 255;
+    auto vert = Mat((85 <= dir) & (dir <= 95) & borders);
+    auto hor = Mat(((170 <= dir) | (dir <= 10)) & borders);
 
-    auto fft_v = fft_ind(borders, crosses.begin() + 0, crosses.begin() + crosses.size() / 2);
-    auto fft_h = fft_ind(borders, crosses.begin() + crosses.size() / 2, crosses.end());
+    Mat intersections = get_intersections(borders, hor, vert, imglen0, 2);
 
-    auto threshold1 = 0.1;
+    vector<Mat> channels = {intersections, vert, hor};
+    Mat coloured;
+    merge(channels, coloured);
 
-    auto points_ = ((fft_v > threshold1) & (fft_h > threshold1) & (fft_v <= 1.0) & (fft_h <= 1.0)); // /255.0;
-    fft_v = ((fft_v > threshold1) & (fft_v <= 1.0));
-    fft_h = ((fft_h > threshold1) & (fft_h <= 1.0));
+    cv::resize(coloured, coloured, {imglen, imglen});
+    cv::imshow("merge", coloured);
 
-    cv::imshow("fft_v", fft_v);
-    cv::imshow("fft_h", fft_h);
+    Mat img_512;
+    cv::resize(img_grayscale, img_512, {imglen, imglen});
 
-    auto points = Mat(points_);
-
-    points.convertTo(points, CV_32F);
-    auto clusters = calc_clusters(points, true);
-
-    fft_v.convertTo(fft_v, CV_8U);
-    fft_h.convertTo(fft_h, CV_8U);
-
-    find_corners(img_256, borders, fft_v, fft_h, points, clusters);
-
+    find_corners(img_512, borders, Mat(vert), Mat(hor), intersections, calc_clusters(intersections, imglen0, true));
 }
 
 int main(int n, char **args) {
-    precalc_cross();
+
+    for (int i = 0; i < 180; i++) {
+        sins[i] = sin(i / 180.0 * acos(-1));
+        coss[i] = cos(i / 180.0 * acos(-1));
+    }
 
     cout << string(args[1]) << endl;
 
