@@ -11,7 +11,6 @@ using namespace std;
 auto start = std::chrono::steady_clock::now();
 
 void telling_time(string s) {
-    return;
     auto end = std::chrono::steady_clock::now();
     cout << s << ' ' << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << endl;
     start = end;
@@ -19,9 +18,10 @@ void telling_time(string s) {
 
 typedef cv::Mat Mat;
 
-const int imglen = 512;
+const int imglen = 256;
 const int imglen0 = 128;
 const int coef = imglen / imglen0;
+const double GLOBAL_TOLERANCE = 0.3;
 
 auto sobel(Mat &src, int threshold) {
     Mat dx, dy, grad, dir;
@@ -54,14 +54,11 @@ auto sobel(Mat &src, int threshold) {
 }
 
 vector<vector<pair<int, int> > > calc_clusters(const Mat &m, int imglen0, bool show_pics = false) {
-    vector<pair<int, int> > points;
-    for (int i = 0; i < imglen0; i++) {
-        for (int j = 0; j < imglen0; j++) {
-            if (m.at<unsigned char>(i, j)) {
-                points.emplace_back(i, j);
-            }
-        }
-    }
+    vector<cv::Point> points_;
+    cv::findNonZero(m, points_);
+    vector<pair<int,int> > points;
+    for (auto &p:points_)
+        points.emplace_back(p.y, p.x);
 
     telling_time("      calc_clusters/iterated picture");
 
@@ -175,40 +172,57 @@ bool intersects(line &l, vector<line> &v) {
     });
 }
 
-Mat get_intersections(Mat &borders, Mat &hor, Mat &vert, int imglen0, int le, bool check_only_8 = false) {
-    Mat intersections = cv::Mat::zeros({imglen0, imglen0}, CV_8U);
+Mat
+get_intersections(Mat &borders, Mat &hor, Mat &vert, int imglen0, int le, vector<vector<pair<int, int> > > &clusters,
+                  bool check_only_8 = false) {
+    Mat hor_sum = hor(cv::Rect(0, 0, imglen0 - le + 1, imglen0 - 1)).clone();
+    Mat vert_sum = vert(cv::Rect(0, 0, imglen0 - 1, imglen0 - le + 1)).clone();
 
-    vector<int> add(imglen0, 1);
-    if (check_only_8)
-        for (int i = 13; i < imglen0; i += imglen0 / 8)
-            add[i] = imglen0 / 8 - 13 * 2;
-
-    for (int i = le; i + 2 + le < imglen0; i += add[i]) {
-        for (int j = le; j + 2 + le < imglen0; j += add[j]) {
-            int val1 = cv::sum(borders(cv::Rect(i, j, 2, 2)))[0];
-
-            int val2 = cv::sum(hor(cv::Rect(i - le, j, le, 2)))[0];
-            if (!val2)
-                continue;
-
-            int val3 = cv::sum(vert(cv::Rect(i, j - le, 2, le)))[0];
-            if (!val3)
-                continue;
-
-
-            int val4 = cv::sum(hor(cv::Rect(i + 2, j, le, 2)))[0];
-            if (!val4)
-                continue;
-
-            int val5 = cv::sum(vert(cv::Rect(i, j + 2, 2, le)))[0];
-
-            int val = (le > 3 || val1) && val2 && val3 && val4 && val5;
-            intersections(cv::Rect(i + 1, j + 1, 1, 1)) = (!!val) * 255;
+    for (int i = 0; i < 2; i++) {
+        for (int j = 0; j < le; j++) {
+            if (i || j) {
+                hor_sum = hor_sum | hor(cv::Rect(j, i, imglen0 - le + 1, imglen0 - 1));
+                vert_sum = vert_sum | vert(cv::Rect(i, j, imglen0 - 1, imglen0 - le + 1));
+            }
         }
     }
 
-    //cv::imshow("keks " + to_string(imglen0), intersections);
+    Mat intersections = cv::Mat::zeros({imglen0 + le + le, imglen0 + le + le}, CV_8U);
 
+    intersections(cv::Rect(le + 2, 2, imglen0 - le + 1, imglen0 - 1)) |= hor_sum;
+    intersections(cv::Rect(0, 2, imglen0 - le + 1, imglen0 - 1)) &= hor_sum;
+
+    intersections(cv::Rect(2, le + 2, imglen0 - 1, imglen0 - le + 1)) &= vert_sum;
+    intersections(cv::Rect(2, 0, imglen0 - 1, imglen0 - le + 1)) &= vert_sum;
+
+    if (le <= 3)
+        intersections(cv::Rect(2, 2, imglen0, imglen0)) &= borders;
+
+    intersections = intersections(cv::Rect(2, 2, imglen0, imglen0));
+
+    intersections(cv::Rect(0, 0, le, imglen0)) *= 0;
+    intersections(cv::Rect(0, 0, imglen0, le)) *= 0;
+
+    intersections(cv::Rect(imglen0 - 2, 0, 2, imglen0)) *= 0;
+    intersections(cv::Rect(0, imglen0 - 2, imglen0, 2)) *= 0;
+
+    //cv::imshow("keks " + to_string(rand()), intersections);
+
+    if (check_only_8) {
+        vector<cv::Point> nonzero;
+        clusters.resize(81);
+
+        cv::findNonZero(intersections, nonzero);
+        for (auto &p: nonzero)
+        {
+            double x = p.x / (imglen0 / 8.0);
+            double y = p.y / (imglen0 / 8.0);
+            if (precision(x) <= GLOBAL_TOLERANCE && precision(y) <= GLOBAL_TOLERANCE){
+                clusters[round(y)*9+round(x)].push_back({p.y, p.x});
+            }
+        }
+
+    };
     return intersections;
 }
 
@@ -696,12 +710,19 @@ find_corners(const Mat &source, const Mat &borders, const Mat &fft_v, const Mat 
     int best_score = -1;
     Mat best_candidate, best_homo;
 
-    for (int x = 0; x <= 8 - x_cells; x++) {
-        for (int y = 0; y <= 8 - y_cells; y++) {
+    set<int> bad_x, bad_y;
+
+    for (int x = 0; x <= 8 - x_cells; x += 1) {
+        for (int y = 0; y <= 8 - y_cells; y += 1) {
             if (x > 0) {
                 shifts[x][y] = h_step_x * shifts[x - 1][y];
             } else if (y > 0) {
-                shifts[x][y] = h_step_y * shifts[x][y - 1];
+                shifts[x][y] =  h_step_y * shifts[x][y - 1];
+            }
+
+            if (bad_x.count(x) || bad_y.count(y))
+            {
+                continue;
             }
 
             auto homo = shifts[x][y] * h_8_8;
@@ -729,6 +750,13 @@ find_corners(const Mat &source, const Mat &borders, const Mat &fft_v, const Mat 
                 best_homo = homo;
             }
 
+            if (vertical_stripe1 <= 0 || vertical_stripe2 <= 0){
+                bad_x.insert(x);
+            }
+
+            if (horizontal_stripe1 <= 0 || horizontal_stripe2 <= 0){
+                bad_y.insert(y);
+            }
 
         }
     }
@@ -769,12 +797,12 @@ find_corners(const Mat &source, const Mat &borders, const Mat &fft_v, const Mat 
                                                  3, 1) / real_corners.at<float>(3, 2)}
         };
 
-        /*cv::line(coloured_source, v_corners[0], v_corners[1], {0, 0, 255}, 2);
-        cv::line(coloured_source, v_corners[1], v_corners[2], {0, 0, 255}, 2);
-        cv::line(coloured_source, v_corners[2], v_corners[3], {0, 0, 255}, 2);
-        cv::line(coloured_source, v_corners[3], v_corners[0], {0, 0, 255}, 2);
-
-        cv::imshow(wname, coloured_source);*/
+//        cv::line(coloured_source, v_corners[0], v_corners[1], {0, 0, 255}, 2);
+//        cv::line(coloured_source, v_corners[1], v_corners[2], {0, 0, 255}, 2);
+//        cv::line(coloured_source, v_corners[2], v_corners[3], {0, 0, 255}, 2);
+//        cv::line(coloured_source, v_corners[3], v_corners[0], {0, 0, 255}, 2);
+//
+//        cv::imshow(wname, coloured_source);
         return v_corners;
     };
 
@@ -791,12 +819,9 @@ find_corners(const Mat &source, const Mat &borders, const Mat &fft_v, const Mat 
         auto vert = Mat((85 <= dir) & (dir <= 95) & borders);
         auto hor = Mat(((170 <= dir) | (dir <= 10)) & borders);
 
-        Mat intersections = get_intersections(borders, hor, vert, imglen, 10, true);
+        vector<vector<pair<int, int> > > new_clusters;
+        get_intersections(borders, hor, vert, imglen, 5, new_clusters, true);
         telling_time("  sobel/v/h/intersections themselves");
-
-        auto new_clusters = calc_clusters(intersections, imglen, true);
-
-        telling_time("  clusters calc");
 
         vector<cv::Point2f> target, src;
 
@@ -816,6 +841,8 @@ find_corners(const Mat &source, const Mat &borders, const Mat &fft_v, const Mat 
                                 {7, 0}};
 
         for (auto &cluster: new_clusters) {
+            if (cluster.empty())
+                continue;
             float y_med = 0, x_med = 0;
             for (auto &pt: cluster) {
                 float y = pt.first, x = pt.second;
@@ -828,12 +855,10 @@ find_corners(const Mat &source, const Mat &borders, const Mat &fft_v, const Mat 
             double x_cross = x_med / (imglen / 8.0);
             double y_cross = y_med / (imglen / 8.0);
 
-            double tolerance = 0.3;
 
-
-            if (-tolerance <= x_cross && x_cross <= 8 + tolerance)
-                if (-tolerance <= y_cross && y_cross <= 8 + tolerance) {
-                    if (precision(x_cross) <= tolerance && precision((y_cross)) <= tolerance) {
+            if (-GLOBAL_TOLERANCE <= x_cross && x_cross <= 8 + GLOBAL_TOLERANCE)
+                if (-GLOBAL_TOLERANCE <= y_cross && y_cross <= 8 + GLOBAL_TOLERANCE) {
+                    if (precision(x_cross) <= GLOBAL_TOLERANCE && precision((y_cross)) <= GLOBAL_TOLERANCE) {
                         src.emplace_back(x_med, y_med);
 
                         miss_x[round(x_cross)] += 1;
@@ -931,8 +956,8 @@ vector<cv::Point2f> find_corners(const string &filename) {
     auto hor = Mat(((170 <= dir) | (dir <= 10)) & borders);
 
     telling_time("vert hor");
-
-    Mat intersections = get_intersections(borders, hor, vert, imglen0, 2);
+    vector<vector<pair<int, int> > > fake;
+    Mat intersections = get_intersections(borders, hor, vert, imglen0, 2, fake);
 
     telling_time("intersections");
 
@@ -962,6 +987,7 @@ int main(int n, char **args) {
         cout << e.what() << endl;
     }
 
+    cv::waitKey();
 
     return 0;
 }
