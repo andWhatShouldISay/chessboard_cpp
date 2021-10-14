@@ -703,10 +703,13 @@ find_corners(const Mat &source, const Mat &borders, const Mat &fft_v, const Mat 
     int best_score = -1;
     Mat best_homo;
 
-    set<int> bad_x, bad_y;
+    Mat candidates;
 
-    auto homo_h2 = cv::Matx33f(1, 0, 0, 0, 1, -(imglen - int(step) + 2), 0, 0, 1);
-    auto homo_v2 = cv::Matx33f(1, 0, -(imglen - int(step) + 2), 0, 1, 0, 0, 0, 1);
+    cv::warpPerspective(source, candidates, cv::Matx33f(1, 0, imglen, 0, 1, imglen, 0, 0, 1) * h_8_8,
+                        {imglen * 2, imglen * 2});
+
+    set<int> bad_x, bad_y;
+    int istep = int(step);
 
     for (int x = 0; x <= 8 - x_cells; x += 1) {
         for (int y = 0; y <= 8 - y_cells; y += 1) {
@@ -720,27 +723,29 @@ find_corners(const Mat &source, const Mat &borders, const Mat &fft_v, const Mat 
                 continue;
             }
 
-            auto homo = shifts[x][y] * h_8_8;
 
-            Mat v1, h1, v2, h2;
-            cv::warpPerspective(source, h1, homo, {imglen, int(step) + 2});
-            cv::warpPerspective(source, v1, homo, {int(step) + 2, imglen});
+            Mat v11, h11, v22, h22;
 
-            cv::warpPerspective(source, h2, homo_h2 * homo, {imglen, int(step) - 2});
-            cv::warpPerspective(source, v2, homo_v2 * homo, {int(step) - 2, imglen});
+            v11 = candidates(cv::Rect(imglen - x * istep, imglen - y * istep, istep + 2, imglen));
+            v22 = candidates(
+                    cv::Rect(imglen - x * istep + (imglen - istep + 2), imglen - y * istep, istep - 2, imglen));
 
+            h11 = candidates(cv::Rect(imglen - x * istep, imglen - y * istep, imglen, istep + 2));
+            h22 = candidates(
+                    cv::Rect(imglen - x * istep, imglen - y * istep + (imglen - istep + 2), imglen, istep - 2));
 
-            int flag = false;
+            int flag = false; // only for debug purposes
 
-            auto vertical_stripe1 = activity(v1, 0);
-            auto vertical_stripe2 = activity(v2, 0);
+            auto vertical_stripe1 = activity(v11, 0);
+            auto vertical_stripe2 = activity(v22, 0);
 
-            auto horizontal_stripe1 = activity(h1.t(), 0);
-            auto horizontal_stripe2 = activity(h2.t(), 0);
+            auto horizontal_stripe1 = activity(h11.t(), 0);
+            auto horizontal_stripe2 = activity(h22.t(), 0);
 
             int score = min({vertical_stripe1, vertical_stripe2, horizontal_stripe1, horizontal_stripe2});
 
             if (score > best_score) {
+                auto homo = shifts[x][y] * h_8_8;
                 best_score = score;
                 best_homo = homo;
             }
@@ -792,12 +797,12 @@ find_corners(const Mat &source, const Mat &borders, const Mat &fft_v, const Mat 
                                                  3, 1) / real_corners.at<float>(3, 2)}
         };
 
-        //cv::line(coloured_source, v_corners[0], v_corners[1], {0, 0, 255}, 2);
-        //cv::line(coloured_source, v_corners[1], v_corners[2], {0, 0, 255}, 2);
-        //cv::line(coloured_source, v_corners[2], v_corners[3], {0, 0, 255}, 2);
-        //cv::line(coloured_source, v_corners[3], v_corners[0], {0, 0, 255}, 2);
-
-        //cv::imshow(wname, coloured_source);
+//        cv::line(coloured_source, v_corners[0], v_corners[1], {0, 0, 255}, 2);
+//        cv::line(coloured_source, v_corners[1], v_corners[2], {0, 0, 255}, 2);
+//        cv::line(coloured_source, v_corners[2], v_corners[3], {0, 0, 255}, 2);
+//        cv::line(coloured_source, v_corners[3], v_corners[0], {0, 0, 255}, 2);
+//
+//        cv::imshow(wname, coloured_source);
         return v_corners;
     };
 
@@ -1001,7 +1006,7 @@ int main(int n, char **args) {
         cout << e.what() << endl;
     }
 
-    //cv::waitKey();
+//    cv::waitKey();
 
     return 0;
 }
